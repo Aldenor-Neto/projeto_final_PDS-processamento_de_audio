@@ -1,0 +1,7 @@
+numpy
+scipy
+sounddevice
+soundfile
+customtkinter
+matplotlib
+numba
