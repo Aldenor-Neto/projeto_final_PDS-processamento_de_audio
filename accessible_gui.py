@@ -30,9 +30,11 @@ class AccessibleAudioApp(tk.Tk):
         self.BLOCK_SIZE = 1024
         self.SAMPLE_RATE = 44100
         self.processor = AudioProcessor(self.BLOCK_SIZE, self.SAMPLE_RATE)
-        self.stream = None
+        self.input_stream = None
+        self.output_stream = None
         self.is_running = False
         self.plot_queue = queue.Queue(maxsize=10)
+        self.audio_queue = queue.Queue(maxsize=5)  # Fila para áudio processado
 
         self._setup_ui()
         
@@ -103,8 +105,8 @@ class AccessibleAudioApp(tk.Tk):
         # 2. Filtros
         group_filter = tk.LabelFrame(controls_frame, text="Filtros", bg="#202020", fg="#aaaaaa")
         group_filter.pack(fill=tk.X, padx=5, pady=5)
-        self.chk_high, self.var_high = create_check(group_filter, "High-Pass (300Hz)", self.update_params)
-        self.chk_low, self.var_low = create_check(group_filter, "Low-Pass (5kHz)", self.update_params)
+        self.chk_high, self.var_high = create_check(group_filter, "High-Pass (300Hz)", self.update_params, "A")
+        self.chk_low, self.var_low = create_check(group_filter, "Low-Pass (5kHz)", self.update_params, "B")
 
         # 3. Tremolo
         group_trem = tk.LabelFrame(controls_frame, text="Tremolo", bg="#202020", fg="#aaaaaa")
@@ -178,34 +180,70 @@ class AccessibleAudioApp(tk.Tk):
         self.processor.mix_wet = wet
         self.processor.mix_dry = 1.0 - (wet * 0.5)
 
-    def audio_callback(self, indata, outdata, frames, time, status):
+    def input_callback(self, indata, frames, time, status):
+        """Callback para captura de áudio - apenas processa, não reproduz"""
         if status: print(status)
         x = indata[:, 0]
         y = self.processor.process_block(x)
-        outdata[:, 0] = y
-        outdata[:, 1] = y
-        try: self.plot_queue.put_nowait(y) 
-        except queue.Full: pass
+        try: 
+            self.audio_queue.put_nowait(y)
+            self.plot_queue.put_nowait(y)
+        except queue.Full: 
+            pass
+    
+    def output_callback(self, outdata, frames, time, status):
+        """Callback para reprodução - apenas reproduz o áudio processado"""
+        if status: print(status)
+        try:
+            # Pega o áudio processado da fila
+            audio_data = self.audio_queue.get_nowait()
+            outdata[:, 0] = audio_data
+            outdata[:, 1] = audio_data
+        except queue.Empty:
+            # Se não houver áudio processado, silencia
+            outdata.fill(0)
 
     def toggle_mic(self):
         if self.is_running:
-            self.stream.stop()
-            self.stream.close()
+            self.input_stream.stop()
+            self.input_stream.close()
+            self.output_stream.stop()
+            self.output_stream.close()
             self.is_running = False
+            # Limpa as filas
+            while not self.audio_queue.empty():
+                try: self.audio_queue.get_nowait()
+                except: break
             self.btn_mic.configure(text="Ativar Microfone (Alt+M)", bg="#006400", activebackground="#008000")
             self.bell() # Som de sistema
         else:
             self.update_params()
             try:
-                self.stream = sd.Stream(channels=2, samplerate=self.SAMPLE_RATE, 
-                                        blocksize=self.BLOCK_SIZE, dtype='float32',
-                                        callback=self.audio_callback)
-                self.stream.start()
+                # Streams separados: entrada e saída independentes
+                # Isso evita o monitoramento automático do Windows
+                self.input_stream = sd.InputStream(
+                    channels=1,
+                    samplerate=self.SAMPLE_RATE,
+                    blocksize=self.BLOCK_SIZE,
+                    dtype='float32',
+                    callback=self.input_callback,
+                    latency='low'
+                )
+                self.output_stream = sd.OutputStream(
+                    channels=2,
+                    samplerate=self.SAMPLE_RATE,
+                    blocksize=self.BLOCK_SIZE,
+                    dtype='float32',
+                    callback=self.output_callback,
+                    latency='low'
+                )
+                self.input_stream.start()
+                self.output_stream.start()
                 self.is_running = True
                 self.btn_mic.configure(text="PARAR MICROFONE (Alt+M)", bg="#8b0000", activebackground="#a52a2a")
                 self.bell()
             except Exception as e:
-                print(e)
+                print(f"Erro ao iniciar streams: {e}")
 
     def update_plot(self):
         try:
