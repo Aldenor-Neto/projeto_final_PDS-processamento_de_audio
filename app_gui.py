@@ -5,6 +5,7 @@ import queue
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from dsp_engine import AudioProcessor
+from collections import deque # Adicionar esta importação
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
@@ -22,6 +23,9 @@ class ModernAudioApp(ctk.CTk):
         self.stream = None
         self.is_running = False
         self.plot_queue = queue.Queue(maxsize=10)
+        
+        self.SPECTROGRAM_HISTORY_SIZE = 100 # Nova constante para o tamanho do histórico
+        self.spec_history = deque(maxlen=self.SPECTROGRAM_HISTORY_SIZE) # Histórico para o espectrograma de tempo e frequência
 
         self._setup_ui()
 
@@ -72,9 +76,9 @@ class ModernAudioApp(ctk.CTk):
         self.lbl_viz = ctk.CTkLabel(self.main_area, text="Visualizador de Sinal", font=ctk.CTkFont(size=16))
         self.lbl_viz.pack(pady=10)
 
-        self.fig, (self.ax_wave, self.ax_spec) = plt.subplots(2, 1, figsize=(5, 4), facecolor='#2b2b2b')
-        self.fig.subplots_adjust(hspace=0.4)
-        
+        self.fig, (self.ax_wave, self.ax_spec, self.ax_time_freq) = plt.subplots(3, 1, figsize=(5, 6), facecolor='#2b2b2b') # Alterar para 3 subplots
+        self.fig.subplots_adjust(hspace=0.6) # Ajustar espaçamento
+
         self.ax_wave.set_title("Osciloscópio", color='white', fontsize=9)
         self.ax_wave.set_ylim(-1, 1)
         self.ax_wave.set_facecolor('#1a1a1a')
@@ -87,6 +91,27 @@ class ModernAudioApp(ctk.CTk):
         self.ax_spec.set_facecolor('#1a1a1a')
         self.ax_spec.tick_params(colors='white', labelsize=8)
         self.line_spec, = self.ax_spec.plot(np.zeros(self.BLOCK_SIZE // 2), color='#ff00cc', lw=1)
+
+        # Novo gráfico: Espectrograma de tempo e frequência
+        self.ax_time_freq.set_title("Intensidade da Frequência (Tempo)", color='white', fontsize=9)
+        self.ax_time_freq.set_ylabel("Frequência (Hz)", color='white', fontsize=8)
+        self.ax_time_freq.set_xlabel("Tempo", color='white', fontsize=8)
+        self.ax_time_freq.set_facecolor('#1a1a1a') # Definir a cor de fundo
+        self.ax_time_freq.tick_params(colors='white', labelsize=8)
+        self.ax_time_freq.set_ylim(0, self.SAMPLE_RATE / 2)
+        self.ax_time_freq.set_xlim(0, self.SPECTROGRAM_HISTORY_SIZE)
+
+        # Inicializa o imshow com dados vazios
+        self.img_time_freq = self.ax_time_freq.imshow(
+            np.zeros((self.BLOCK_SIZE // 2, self.SPECTROGRAM_HISTORY_SIZE)),
+            origin='lower',
+            aspect='auto',
+            cmap='hot', # Alterei de 'magma' para 'hot'
+            extent=[0, self.SPECTROGRAM_HISTORY_SIZE, 0, self.SAMPLE_RATE / 2],
+            vmin=0.0001, # Ajustei vmin para um valor ainda menor
+            vmax=0.02, # Ajustei vmax para um valor ainda menor
+            interpolation='bilinear'
+        )
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.main_area)
         self.canvas.draw()
@@ -129,14 +154,13 @@ class ModernAudioApp(ctk.CTk):
 
         wet = self.slider_mix.get()
         self.processor.mix_wet = wet
-        self.processor.mix_dry = 1.0 - (wet * 0.5)
+        self.processor.mix_dry = 1.0 - wet # Alterado de 1.0 - (wet * 0.5)
 
     def audio_callback(self, indata, outdata, frames, time, status):
         if status: print(status)
         x = indata[:, 0]
         y = self.processor.process_block(x)
         outdata[:, 0] = y
-        outdata[:, 1] = y
         try: self.plot_queue.put_nowait(y) 
         except queue.Full: pass
 
@@ -149,7 +173,7 @@ class ModernAudioApp(ctk.CTk):
         else:
             self.update_params()
             try:
-                self.stream = sd.Stream(channels=2, samplerate=self.SAMPLE_RATE, 
+                self.stream = sd.Stream(channels=1, samplerate=self.SAMPLE_RATE, 
                                         blocksize=self.BLOCK_SIZE, dtype='float32',
                                         callback=self.audio_callback)
                 self.stream.start()
@@ -170,6 +194,17 @@ class ModernAudioApp(ctk.CTk):
                 mag = mag * 4 / self.BLOCK_SIZE
                 self.line_spec.set_ydata(mag)
                 self.line_spec.set_xdata(np.linspace(0, self.SAMPLE_RATE/2, len(mag)))
+                
+                # Adicionar os dados ao histórico do espectrograma de tempo e frequência
+                self.spec_history.append(mag)
+                if len(self.spec_history) > self.SPECTROGRAM_HISTORY_SIZE:
+                    self.spec_history.popleft()
+
+                # Atualizar o gráfico de intensidade da frequência ao longo do tempo
+                # Transpor a matriz para que o tempo seja o eixo X e a frequência o eixo Y
+                spec_data_2d = np.array(list(self.spec_history)).T
+                self.img_time_freq.set_array(spec_data_2d)
+                
                 self.canvas.draw_idle()
         except: pass
         self.after(50, self.update_plot)
