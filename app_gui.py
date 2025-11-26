@@ -9,6 +9,35 @@ from dsp_engine import AudioProcessor
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
+def find_asio_device():
+    """Encontra dispositivo ASIO (prioriza Roland)"""
+    try:
+        devices = sd.query_devices()
+        asio_devices = []
+        roland_device = None
+        
+        for i, device in enumerate(devices):
+            # Verifica se é ASIO (hostapi pode ser 'asio' ou nome contém 'asio')
+            hostapi_info = sd.query_hostapis(device['hostapi'])
+            hostapi_name = hostapi_info['name'].lower()
+            
+            if 'asio' in hostapi_name:
+                asio_devices.append((i, device))
+                # Prioriza dispositivos Roland
+                if 'roland' in device['name'].lower() or 'capture' in device['name'].lower():
+                    roland_device = i
+        
+        # Retorna dispositivo Roland se encontrado, senão primeiro ASIO
+        if roland_device is not None:
+            return roland_device
+        elif asio_devices:
+            return asio_devices[0][0]
+        else:
+            return None
+    except Exception as e:
+        print(f"Erro ao procurar dispositivo ASIO: {e}")
+        return None
+
 class ModernAudioApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -24,6 +53,7 @@ class ModernAudioApp(ctk.CTk):
         self.is_running = False
         self.plot_queue = queue.Queue(maxsize=10)
         self.audio_queue = queue.Queue(maxsize=5)  # Fila para áudio processado
+        self.asio_device = find_asio_device()  # Detecta dispositivo ASIO
 
         self._setup_ui()
 
@@ -43,7 +73,7 @@ class ModernAudioApp(ctk.CTk):
 
         # 1. Seção Distorção
         self.add_section("Distorção (Fuzz)", "distortion")
-        self.slider_dist = self.add_slider("Ganho", 1, 50, 20, self.update_params)
+        self.slider_dist = self.add_slider("Ganho", 1, 50, 50, self.update_params)
         
         # 2. Seção Filtros
         ctk.CTkLabel(self.sidebar, text="----- Filtros -----", text_color="gray").pack(pady=10)
@@ -54,18 +84,18 @@ class ModernAudioApp(ctk.CTk):
 
         # 3. Seção Tremolo
         self.add_section("Tremolo (Modulação)", "tremolo")
-        self.slider_trem_rate = self.add_slider("Velocidade (Hz)", 0.5, 15, 5, self.update_params)
-        self.slider_trem_depth = self.add_slider("Profundidade", 0.0, 1.0, 0.6, self.update_params)
+        self.slider_trem_rate = self.add_slider("Velocidade (Hz)", 0.5, 15, 15, self.update_params)
+        self.slider_trem_depth = self.add_slider("Profundidade", 0.0, 1.0, 1.0, self.update_params)
 
         # 4. Seção Delay
         self.add_section("Delay (Eco)", "delay")
-        self.slider_delay_time = self.add_slider("Tempo (s)", 0.1, 1.0, 0.4, self.update_params)
-        self.slider_delay_fb = self.add_slider("Feedback", 0.0, 0.9, 0.5, self.update_params)
+        self.slider_delay_time = self.add_slider("Tempo (s)", 0.1, 1.0, 1.0, self.update_params)
+        self.slider_delay_fb = self.add_slider("Feedback", 0.0, 0.9, 0.9, self.update_params)
 
         # 5. Seção Reverb
         self.add_section("Reverb (Convolução)", "reverb")
         self.sw_reverb.select() # Padrão ligado
-        self.slider_mix = self.add_slider("Mix Level", 0.0, 1.0, 0.3, self.update_params)
+        self.slider_mix = self.add_slider("Mix Level", 0.0, 1.0, 1.0, self.update_params)
 
         # --- ÁREA PRINCIPAL (GRÁFICOS) ---
         self.main_area = ctk.CTkFrame(self, corner_radius=10)
@@ -170,31 +200,65 @@ class ModernAudioApp(ctk.CTk):
             self.btn_mic.configure(text="ATIVAR MICROFONE", fg_color="#2ecc71")
         else:
             self.update_params()
+            # Configura dispositivo ASIO se disponível
+            device = self.asio_device
+            if device is not None:
+                print(f"Usando dispositivo ASIO: {sd.query_devices(device)['name']}")
+            
             try:
                 # Streams separados: entrada e saída independentes
-                # Isso evita o monitoramento automático do Windows
+                # Usa ASIO para evitar monitoramento automático e reduzir latência
+                stream_kwargs = {
+                    'samplerate': self.SAMPLE_RATE,
+                    'blocksize': self.BLOCK_SIZE,
+                    'dtype': 'float32',
+                    'latency': 'low'  # Latência mínima com ASIO
+                }
+                
+                if device is not None:
+                    stream_kwargs['device'] = device
+                
                 self.input_stream = sd.InputStream(
                     channels=1,
-                    samplerate=self.SAMPLE_RATE,
-                    blocksize=self.BLOCK_SIZE,
-                    dtype='float32',
                     callback=self.input_callback,
-                    latency='low'
+                    **stream_kwargs
                 )
                 self.output_stream = sd.OutputStream(
                     channels=2,
-                    samplerate=self.SAMPLE_RATE,
-                    blocksize=self.BLOCK_SIZE,
-                    dtype='float32',
                     callback=self.output_callback,
-                    latency='low'
+                    **stream_kwargs
                 )
                 self.input_stream.start()
                 self.output_stream.start()
                 self.is_running = True
                 self.btn_mic.configure(text="PARAR", fg_color="#c0392b")
             except Exception as e:
-                print(f"Erro ao iniciar streams: {e}")
+                print(f"Erro ao iniciar streams com ASIO: {e}")
+                # Tenta sem especificar dispositivo se ASIO falhar
+                try:
+                    print("Tentando sem dispositivo ASIO específico...")
+                    self.input_stream = sd.InputStream(
+                        channels=1,
+                        samplerate=self.SAMPLE_RATE,
+                        blocksize=self.BLOCK_SIZE,
+                        dtype='float32',
+                        callback=self.input_callback,
+                        latency='low'
+                    )
+                    self.output_stream = sd.OutputStream(
+                        channels=2,
+                        samplerate=self.SAMPLE_RATE,
+                        blocksize=self.BLOCK_SIZE,
+                        dtype='float32',
+                        callback=self.output_callback,
+                        latency='low'
+                    )
+                    self.input_stream.start()
+                    self.output_stream.start()
+                    self.is_running = True
+                    self.btn_mic.configure(text="PARAR", fg_color="#c0392b")
+                except Exception as e2:
+                    print(f"Erro ao iniciar streams sem ASIO: {e2}")
 
     def update_plot(self):
         try:

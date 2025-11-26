@@ -6,6 +6,35 @@ from scipy import signal
 import wx
 import queue
 
+def find_asio_device():
+    """Encontra dispositivo ASIO (prioriza Roland)"""
+    try:
+        devices = sd.query_devices()
+        asio_devices = []
+        roland_device = None
+        
+        for i, device in enumerate(devices):
+            # Verifica se é ASIO (hostapi pode ser 'asio' ou nome contém 'asio')
+            hostapi_info = sd.query_hostapis(device['hostapi'])
+            hostapi_name = hostapi_info['name'].lower()
+            
+            if 'asio' in hostapi_name:
+                asio_devices.append((i, device))
+                # Prioriza dispositivos Roland
+                if 'roland' in device['name'].lower() or 'capture' in device['name'].lower():
+                    roland_device = i
+        
+        # Retorna dispositivo Roland se encontrado, senão primeiro ASIO
+        if roland_device is not None:
+            return roland_device
+        elif asio_devices:
+            return asio_devices[0][0]
+        else:
+            return None
+    except Exception as e:
+        print(f"Erro ao procurar dispositivo ASIO: {e}")
+        return None
+
 AUDIO_IR = 'sounds/Banheiro.wav'
 BLOCK_SIZE = 2048
 MIX_DRY = 0.7
@@ -30,6 +59,7 @@ overlap = np.zeros(len(h) - 1, dtype=np.float32)
 input_stream = None
 output_stream = None
 audio_queue = queue.Queue(maxsize=5)  # Fila para áudio processado
+asio_device = find_asio_device()  # Detecta dispositivo ASIO
 reverbe_ativo = True
 high_pass_ativo = False
 low_pass_ativo = False
@@ -47,13 +77,13 @@ zi_low = signal.lfilter_zi(b_low, a_low)
 state_high = None
 state_low = None
 
-# Parâmetros dos efeitos
-dist_gain = 20.0
-tremolo_rate = 5.0
-tremolo_depth = 0.6
+# Parâmetros dos efeitos (inicializados no máximo)
+dist_gain = 50.0
+tremolo_rate = 15.0
+tremolo_depth = 1.0
 tremolo_phase = 0.0
-delay_time = 0.4
-delay_feedback = 0.5
+delay_time = 1.0
+delay_feedback = 0.9
 delay_buffer_len = int(SR * 2)
 delay_buffer = np.zeros(delay_buffer_len, dtype=np.float32)
 delay_write_head = 0
@@ -201,7 +231,7 @@ class AudioApp(wx.Frame):
         self.check_distortion = wx.CheckBox(panel, label="Ativar Distorção")
         self.check_distortion.Bind(wx.EVT_CHECKBOX, self.toggle_distortion)
         sizer_dist.Add(self.check_distortion, flag=wx.ALL, border=5)
-        self.slider_dist = wx.Slider(panel, value=20, minValue=1, maxValue=50, style=wx.SL_HORIZONTAL | wx.SL_LABELS)
+        self.slider_dist = wx.Slider(panel, value=50, minValue=1, maxValue=50, style=wx.SL_HORIZONTAL | wx.SL_LABELS)
         self.slider_dist.Bind(wx.EVT_SLIDER, self.update_distortion)
         sizer_dist.Add(self.slider_dist, flag=wx.ALL | wx.EXPAND, border=5)
         vbox.Add(sizer_dist, flag=wx.ALL | wx.EXPAND, border=5)
@@ -223,11 +253,11 @@ class AudioApp(wx.Frame):
         self.check_tremolo = wx.CheckBox(panel, label="Ativar Tremolo")
         self.check_tremolo.Bind(wx.EVT_CHECKBOX, self.toggle_tremolo)
         sizer_trem.Add(self.check_tremolo, flag=wx.ALL, border=5)
-        self.slider_trem_rate = wx.Slider(panel, value=5, minValue=1, maxValue=15, style=wx.SL_HORIZONTAL | wx.SL_LABELS)
+        self.slider_trem_rate = wx.Slider(panel, value=15, minValue=1, maxValue=15, style=wx.SL_HORIZONTAL | wx.SL_LABELS)
         self.slider_trem_rate.Bind(wx.EVT_SLIDER, self.update_tremolo)
         sizer_trem.Add(wx.StaticText(panel, label="Velocidade (Hz)"), flag=wx.ALL, border=2)
         sizer_trem.Add(self.slider_trem_rate, flag=wx.ALL | wx.EXPAND, border=5)
-        self.slider_trem_depth = wx.Slider(panel, value=60, minValue=0, maxValue=100, style=wx.SL_HORIZONTAL | wx.SL_LABELS)
+        self.slider_trem_depth = wx.Slider(panel, value=100, minValue=0, maxValue=100, style=wx.SL_HORIZONTAL | wx.SL_LABELS)
         self.slider_trem_depth.Bind(wx.EVT_SLIDER, self.update_tremolo)
         sizer_trem.Add(wx.StaticText(panel, label="Profundidade"), flag=wx.ALL, border=2)
         sizer_trem.Add(self.slider_trem_depth, flag=wx.ALL | wx.EXPAND, border=5)
@@ -239,11 +269,11 @@ class AudioApp(wx.Frame):
         self.check_delay = wx.CheckBox(panel, label="Ativar Delay")
         self.check_delay.Bind(wx.EVT_CHECKBOX, self.toggle_delay)
         sizer_delay.Add(self.check_delay, flag=wx.ALL, border=5)
-        self.slider_delay_time = wx.Slider(panel, value=40, minValue=10, maxValue=100, style=wx.SL_HORIZONTAL | wx.SL_LABELS)
+        self.slider_delay_time = wx.Slider(panel, value=100, minValue=10, maxValue=100, style=wx.SL_HORIZONTAL | wx.SL_LABELS)
         self.slider_delay_time.Bind(wx.EVT_SLIDER, self.update_delay)
         sizer_delay.Add(wx.StaticText(panel, label="Tempo (0.1-1.0s)"), flag=wx.ALL, border=2)
         sizer_delay.Add(self.slider_delay_time, flag=wx.ALL | wx.EXPAND, border=5)
-        self.slider_delay_fb = wx.Slider(panel, value=50, minValue=0, maxValue=90, style=wx.SL_HORIZONTAL | wx.SL_LABELS)
+        self.slider_delay_fb = wx.Slider(panel, value=90, minValue=0, maxValue=90, style=wx.SL_HORIZONTAL | wx.SL_LABELS)
         self.slider_delay_fb.Bind(wx.EVT_SLIDER, self.update_delay)
         sizer_delay.Add(wx.StaticText(panel, label="Feedback (0-0.9)"), flag=wx.ALL, border=2)
         sizer_delay.Add(self.slider_delay_fb, flag=wx.ALL | wx.EXPAND, border=5)
@@ -268,7 +298,7 @@ class AudioApp(wx.Frame):
 
     def toggle_microfone(self, event):
         global input_stream, output_stream, overlap, state_high, state_low, audio_queue
-        global delay_buffer, delay_write_head, tremolo_phase
+        global delay_buffer, delay_write_head, tremolo_phase, asio_device
         if input_stream is None:
             overlap[:] = 0
             state_high = None
@@ -280,27 +310,64 @@ class AudioApp(wx.Frame):
             while not audio_queue.empty():
                 try: audio_queue.get_nowait()
                 except: break
+            # Configura dispositivo ASIO se disponível
+            device = asio_device
+            if device is not None:
+                print(f"Usando dispositivo ASIO: {sd.query_devices(device)['name']}")
+            
             # Streams separados: entrada e saída independentes
-            # Isso evita o monitoramento automático do Windows
-            input_stream = sd.InputStream(
-                channels=1,
-                samplerate=SR,
-                blocksize=BLOCK_SIZE,
-                dtype='float32',
-                callback=input_callback,
-                latency='low'
-            )
-            output_stream = sd.OutputStream(
-                channels=1,
-                samplerate=SR,
-                blocksize=BLOCK_SIZE,
-                dtype='float32',
-                callback=output_callback,
-                latency='low'
-            )
-            input_stream.start()
-            output_stream.start()
-            self.botao_mic.SetLabel("Desativar Microfone")
+            # Usa ASIO para evitar monitoramento automático e reduzir latência
+            stream_kwargs = {
+                'samplerate': SR,
+                'blocksize': BLOCK_SIZE,
+                'dtype': 'float32',
+                'latency': 'low'  # Latência mínima com ASIO
+            }
+            
+            if device is not None:
+                stream_kwargs['device'] = device
+            
+            try:
+                input_stream = sd.InputStream(
+                    channels=1,
+                    callback=input_callback,
+                    **stream_kwargs
+                )
+                output_stream = sd.OutputStream(
+                    channels=1,
+                    callback=output_callback,
+                    **stream_kwargs
+                )
+                input_stream.start()
+                output_stream.start()
+                self.botao_mic.SetLabel("Desativar Microfone")
+            except Exception as e:
+                print(f"Erro ao iniciar streams com ASIO: {e}")
+                # Tenta sem especificar dispositivo se ASIO falhar
+                try:
+                    print("Tentando sem dispositivo ASIO específico...")
+                    input_stream = sd.InputStream(
+                        channels=1,
+                        samplerate=SR,
+                        blocksize=BLOCK_SIZE,
+                        dtype='float32',
+                        callback=input_callback,
+                        latency='low'
+                    )
+                    output_stream = sd.OutputStream(
+                        channels=1,
+                        samplerate=SR,
+                        blocksize=BLOCK_SIZE,
+                        dtype='float32',
+                        callback=output_callback,
+                        latency='low'
+                    )
+                    input_stream.start()
+                    output_stream.start()
+                    self.botao_mic.SetLabel("Desativar Microfone")
+                except Exception as e2:
+                    print(f"Erro ao iniciar streams sem ASIO: {e2}")
+                    wx.MessageBox(f"Erro ao iniciar áudio: {e2}", "Erro", wx.OK | wx.ICON_ERROR)
         else:
             input_stream.stop()
             input_stream.close()
