@@ -55,6 +55,10 @@ class ModernAudioApp(ctk.CTk):
         self.audio_queue = queue.Queue(maxsize=5)  # Fila para áudio processado
         self.asio_device = find_asio_device()  # Detecta dispositivo ASIO
 
+        # Buffer para o espectrograma
+        # 10 segundos * SAMPLE_RATE / BLOCK_SIZE = 10 * 44100 / 1024 = ~430.6
+        self.spectrogram_buffer = np.zeros((self.BLOCK_SIZE // 2, 440)) # 440 colunas para ~10 segundos
+
         self._setup_ui()
 
     def _setup_ui(self):
@@ -104,9 +108,9 @@ class ModernAudioApp(ctk.CTk):
         self.lbl_viz = ctk.CTkLabel(self.main_area, text="Visualizador de Sinal", font=ctk.CTkFont(size=16))
         self.lbl_viz.pack(pady=10)
 
-        self.fig, (self.ax_wave, self.ax_spec) = plt.subplots(2, 1, figsize=(5, 4), facecolor='#2b2b2b')
-        self.fig.subplots_adjust(hspace=0.4)
-        
+        self.fig, (self.ax_wave, self.ax_spec, self.ax_phase) = plt.subplots(3, 1, figsize=(5, 6), facecolor='#2b2b2b') # Aumentado para 3 subplots
+        self.fig.subplots_adjust(hspace=0.6) # Ajustado o espaçamento vertical
+
         self.ax_wave.set_title("Osciloscópio", color='white', fontsize=9)
         self.ax_wave.set_ylim(-1, 1)
         self.ax_wave.set_facecolor('#1a1a1a')
@@ -119,6 +123,21 @@ class ModernAudioApp(ctk.CTk):
         self.ax_spec.set_facecolor('#1a1a1a')
         self.ax_spec.tick_params(colors='white', labelsize=8)
         self.line_spec, = self.ax_spec.plot(np.zeros(self.BLOCK_SIZE // 2), color='#ff00cc', lw=1)
+
+        self.ax_phase.set_title("Espectrograma de Frequência x Tempo", color='white', fontsize=9)
+        self.ax_phase.set_xlabel("Tempo (s)", color='white', fontsize=8) # Rótulo do eixo X para segundos
+        self.ax_phase.set_ylabel("Frequência (Hz)", color='white', fontsize=8)
+        self.ax_phase.set_facecolor('#1a1a1a')
+        self.ax_phase.tick_params(colors='white', labelsize=8)
+        self.ax_phase.set_ylim(0, 10000) # Frequência ajustada para 10000 Hz
+        self.ax_phase.set_xlim(0, 10) # Tempo ajustado para 0 a 10 segundos
+
+        # Usar imshow para o espectrograma
+        self.im_spectrogram = self.ax_phase.imshow(self.spectrogram_buffer, 
+                                                    origin='lower', aspect='auto', 
+                                                    cmap='inferno', 
+                                                    extent=[0, 10, 0, self.SAMPLE_RATE/2],
+                                                    vmin=-60, vmax=0) # Ajustado vmin e vmax para escala em dB
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.main_area)
         self.canvas.draw()
@@ -270,8 +289,18 @@ class ModernAudioApp(ctk.CTk):
                 fft_data = np.fft.fft(data)
                 mag = np.abs(fft_data[:len(data)//2])
                 mag = mag * 4 / self.BLOCK_SIZE
+                
+                # Converte para decibéis
+                mag_db = 20 * np.log10(mag + 1e-10) # Adiciona um pequeno offset para evitar log(0)
+
                 self.line_spec.set_ydata(mag)
                 self.line_spec.set_xdata(np.linspace(0, self.SAMPLE_RATE/2, len(mag)))
+
+                # Atualiza o buffer do espectrograma com valores em dB
+                self.spectrogram_buffer = np.roll(self.spectrogram_buffer, -1, axis=1)
+                self.spectrogram_buffer[:, -1] = mag_db
+                self.im_spectrogram.set_array(self.spectrogram_buffer)
+
                 self.canvas.draw_idle()
         except: pass
         self.after(50, self.update_plot)
