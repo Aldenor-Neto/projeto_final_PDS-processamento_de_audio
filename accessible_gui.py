@@ -7,6 +7,35 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from dsp_engine import AudioProcessor
 
+def find_asio_device():
+    """Encontra dispositivo ASIO (prioriza Roland)"""
+    try:
+        devices = sd.query_devices()
+        asio_devices = []
+        roland_device = None
+        
+        for i, device in enumerate(devices):
+            # Verifica se é ASIO (hostapi pode ser 'asio' ou nome contém 'asio')
+            hostapi_info = sd.query_hostapis(device['hostapi'])
+            hostapi_name = hostapi_info['name'].lower()
+            
+            if 'asio' in hostapi_name:
+                asio_devices.append((i, device))
+                # Prioriza dispositivos Roland
+                if 'roland' in device['name'].lower() or 'capture' in device['name'].lower():
+                    roland_device = i
+        
+        # Retorna dispositivo Roland se encontrado, senão primeiro ASIO
+        if roland_device is not None:
+            return roland_device
+        elif asio_devices:
+            return asio_devices[0][0]
+        else:
+            return None
+    except Exception as e:
+        print(f"Erro ao procurar dispositivo ASIO: {e}")
+        return None
+
 class AccessibleAudioApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -30,9 +59,12 @@ class AccessibleAudioApp(tk.Tk):
         self.BLOCK_SIZE = 1024
         self.SAMPLE_RATE = 44100
         self.processor = AudioProcessor(self.BLOCK_SIZE, self.SAMPLE_RATE)
-        self.stream = None
+        self.input_stream = None
+        self.output_stream = None
         self.is_running = False
         self.plot_queue = queue.Queue(maxsize=10)
+        self.audio_queue = queue.Queue(maxsize=5)  # Fila para áudio processado
+        self.asio_device = find_asio_device()  # Detecta dispositivo ASIO
 
         self._setup_ui()
         
@@ -98,34 +130,34 @@ class AccessibleAudioApp(tk.Tk):
         group_dist = tk.LabelFrame(controls_frame, text="Distorção", bg="#202020", fg="#aaaaaa")
         group_dist.pack(fill=tk.X, padx=5, pady=5)
         self.chk_dist, self.var_dist = create_check(group_dist, "Ativar Distorção", self.update_params, "D")
-        self.slider_dist = create_slider(group_dist, "Ganho", 1, 50, 20, self.update_params)
+        self.slider_dist = create_slider(group_dist, "Ganho", 1, 50, 50, self.update_params)
 
         # 2. Filtros
         group_filter = tk.LabelFrame(controls_frame, text="Filtros", bg="#202020", fg="#aaaaaa")
         group_filter.pack(fill=tk.X, padx=5, pady=5)
-        self.chk_high, self.var_high = create_check(group_filter, "High-Pass (300Hz)", self.update_params)
-        self.chk_low, self.var_low = create_check(group_filter, "Low-Pass (5kHz)", self.update_params)
+        self.chk_high, self.var_high = create_check(group_filter, "High-Pass (300Hz)", self.update_params, "A")
+        self.chk_low, self.var_low = create_check(group_filter, "Low-Pass (5kHz)", self.update_params, "B")
 
         # 3. Tremolo
         group_trem = tk.LabelFrame(controls_frame, text="Tremolo", bg="#202020", fg="#aaaaaa")
         group_trem.pack(fill=tk.X, padx=5, pady=5)
         self.chk_trem, self.var_trem = create_check(group_trem, "Ativar Tremolo", self.update_params, "T")
-        self.slider_trem_rate = create_slider(group_trem, "Velocidade", 0.5, 15, 5, self.update_params)
-        self.slider_trem_depth = create_slider(group_trem, "Profundidade", 0.0, 1.0, 0.6, self.update_params)
+        self.slider_trem_rate = create_slider(group_trem, "Velocidade", 0.5, 15, 15, self.update_params)
+        self.slider_trem_depth = create_slider(group_trem, "Profundidade", 0.0, 1.0, 1.0, self.update_params)
 
         # 4. Delay
         group_delay = tk.LabelFrame(controls_frame, text="Delay (Eco)", bg="#202020", fg="#aaaaaa")
         group_delay.pack(fill=tk.X, padx=5, pady=5)
         self.chk_delay, self.var_delay = create_check(group_delay, "Ativar Delay", self.update_params, "E") # E de Eco
-        self.slider_delay_time = create_slider(group_delay, "Tempo", 0.1, 1.0, 0.4, self.update_params)
-        self.slider_delay_fb = create_slider(group_delay, "Feedback", 0.0, 0.9, 0.5, self.update_params)
+        self.slider_delay_time = create_slider(group_delay, "Tempo", 0.1, 1.0, 1.0, self.update_params)
+        self.slider_delay_fb = create_slider(group_delay, "Feedback", 0.0, 0.9, 0.9, self.update_params)
 
         # 5. Reverb
         group_reverb = tk.LabelFrame(controls_frame, text="Reverb", bg="#202020", fg="#aaaaaa")
         group_reverb.pack(fill=tk.X, padx=5, pady=5)
         self.chk_reverb, self.var_reverb = create_check(group_reverb, "Ativar Reverb", self.update_params, "R")
         self.var_reverb.set(True) # Começa ligado
-        self.slider_mix = create_slider(group_reverb, "Mix Level", 0.0, 1.0, 0.3, self.update_params)
+        self.slider_mix = create_slider(group_reverb, "Mix Level", 0.0, 1.0, 1.0, self.update_params)
 
         # --- COLUNA DA DIREITA (GRÁFICOS) ---
         viz_frame = tk.Frame(main_frame, bg="#202020")
@@ -178,34 +210,105 @@ class AccessibleAudioApp(tk.Tk):
         self.processor.mix_wet = wet
         self.processor.mix_dry = 1.0 - (wet * 0.5)
 
-    def audio_callback(self, indata, outdata, frames, time, status):
+    def input_callback(self, indata, frames, time, status):
+        """Callback para captura de áudio - apenas processa, não reproduz"""
         if status: print(status)
         x = indata[:, 0]
         y = self.processor.process_block(x)
-        outdata[:, 0] = y
-        outdata[:, 1] = y
-        try: self.plot_queue.put_nowait(y) 
-        except queue.Full: pass
+        try: 
+            self.audio_queue.put_nowait(y)
+            self.plot_queue.put_nowait(y)
+        except queue.Full: 
+            pass
+    
+    def output_callback(self, outdata, frames, time, status):
+        """Callback para reprodução - apenas reproduz o áudio processado"""
+        if status: print(status)
+        try:
+            # Pega o áudio processado da fila
+            audio_data = self.audio_queue.get_nowait()
+            outdata[:, 0] = audio_data
+            outdata[:, 1] = audio_data
+        except queue.Empty:
+            # Se não houver áudio processado, silencia
+            outdata.fill(0)
 
     def toggle_mic(self):
         if self.is_running:
-            self.stream.stop()
-            self.stream.close()
+            self.input_stream.stop()
+            self.input_stream.close()
+            self.output_stream.stop()
+            self.output_stream.close()
             self.is_running = False
+            # Limpa as filas
+            while not self.audio_queue.empty():
+                try: self.audio_queue.get_nowait()
+                except: break
             self.btn_mic.configure(text="Ativar Microfone (Alt+M)", bg="#006400", activebackground="#008000")
             self.bell() # Som de sistema
         else:
             self.update_params()
+            # Configura dispositivo ASIO se disponível
+            device = self.asio_device
+            if device is not None:
+                print(f"Usando dispositivo ASIO: {sd.query_devices(device)['name']}")
+            
             try:
-                self.stream = sd.Stream(channels=2, samplerate=self.SAMPLE_RATE, 
-                                        blocksize=self.BLOCK_SIZE, dtype='float32',
-                                        callback=self.audio_callback)
-                self.stream.start()
+                # Streams separados: entrada e saída independentes
+                # Usa ASIO para evitar monitoramento automático e reduzir latência
+                stream_kwargs = {
+                    'samplerate': self.SAMPLE_RATE,
+                    'blocksize': self.BLOCK_SIZE,
+                    'dtype': 'float32',
+                    'latency': 'low'  # Latência mínima com ASIO
+                }
+                
+                if device is not None:
+                    stream_kwargs['device'] = device
+                
+                self.input_stream = sd.InputStream(
+                    channels=1,
+                    callback=self.input_callback,
+                    **stream_kwargs
+                )
+                self.output_stream = sd.OutputStream(
+                    channels=2,
+                    callback=self.output_callback,
+                    **stream_kwargs
+                )
+                self.input_stream.start()
+                self.output_stream.start()
                 self.is_running = True
                 self.btn_mic.configure(text="PARAR MICROFONE (Alt+M)", bg="#8b0000", activebackground="#a52a2a")
                 self.bell()
             except Exception as e:
-                print(e)
+                print(f"Erro ao iniciar streams com ASIO: {e}")
+                # Tenta sem especificar dispositivo se ASIO falhar
+                try:
+                    print("Tentando sem dispositivo ASIO específico...")
+                    self.input_stream = sd.InputStream(
+                        channels=1,
+                        samplerate=self.SAMPLE_RATE,
+                        blocksize=self.BLOCK_SIZE,
+                        dtype='float32',
+                        callback=self.input_callback,
+                        latency='low'
+                    )
+                    self.output_stream = sd.OutputStream(
+                        channels=2,
+                        samplerate=self.SAMPLE_RATE,
+                        blocksize=self.BLOCK_SIZE,
+                        dtype='float32',
+                        callback=self.output_callback,
+                        latency='low'
+                    )
+                    self.input_stream.start()
+                    self.output_stream.start()
+                    self.is_running = True
+                    self.btn_mic.configure(text="PARAR MICROFONE (Alt+M)", bg="#8b0000", activebackground="#a52a2a")
+                    self.bell()
+                except Exception as e2:
+                    print(f"Erro ao iniciar streams sem ASIO: {e2}")
 
     def update_plot(self):
         try:

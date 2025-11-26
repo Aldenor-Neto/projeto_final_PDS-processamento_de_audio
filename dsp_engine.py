@@ -11,8 +11,8 @@ class AudioProcessor:
         self.sr = sample_rate
         
         # --- Parâmetros Gerais ---
-        self.mix_dry = 0.7
-        self.mix_wet = 0.3
+        self.mix_dry = 0.0  # Ajustado para mix_wet máximo
+        self.mix_wet = 1.0  # Máximo
         
         # --- Flags de Efeitos ---
         self.high_pass_on = False
@@ -22,12 +22,12 @@ class AudioProcessor:
         self.delay_on = False
         self.reverb_on = True
         
-        # --- Parâmetros dos Efeitos ---
-        self.dist_gain = 20.0       # Ganho da distorção (Drive)
-        self.tremolo_rate = 5.0     # Hz (Velocidade)
-        self.tremolo_depth = 0.6    # Profundidade (0 a 1)
-        self.delay_time = 0.4       # Segundos
-        self.delay_feedback = 0.5   # Quanto som volta (0 a 1)
+        # --- Parâmetros dos Efeitos (inicializados no máximo) ---
+        self.dist_gain = 50.0       # Ganho da distorção (Drive) - Máximo
+        self.tremolo_rate = 15.0    # Hz (Velocidade) - Máximo
+        self.tremolo_depth = 1.0    # Profundidade (0 a 1) - Máximo
+        self.delay_time = 1.0       # Segundos - Máximo
+        self.delay_feedback = 0.9   # Quanto som volta (0 a 1) - Máximo
 
         # --- Inicialização de Memória (States) ---
         
